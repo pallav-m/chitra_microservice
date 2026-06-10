@@ -31,9 +31,13 @@ class ModelRegistry:
     @classmethod
     def get_speaker_encoder(cls):
         if cls._speaker_encoder is None:
+            # SpeechBrain only understands "cpu"/"cuda"; it has no MPS branch and
+            # crashes on a bare "mps" device. Fall back to CPU on Apple Silicon
+            # (ECAPA is light enough that this is fine for local dev).
+            device = "cpu" if settings.device.startswith("mps") else settings.device
             cls._speaker_encoder = EncoderClassifier.from_hparams(
                 source=settings.speaker_model_source,
-                run_opts={"device": settings.device},
+                run_opts={"device": device},
             )
         return cls._speaker_encoder
 
