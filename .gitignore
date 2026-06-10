@@ -9,7 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
-
+# Testing and temp folders
 notebooks/
 *.ipynb
 CLAUDE.md
+api_testing/
+
+# Load-test artifacts (keep the harness + configs tracked)
+api_testing/results/
+api_testing/samples/*.wav

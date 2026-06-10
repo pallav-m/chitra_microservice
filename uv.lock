@@ -367,6 +367,7 @@ dev = [
     { name = "jupyterlab" },
     { name = "nbconvert" },
     { name = "pytest" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -391,6 +392,7 @@ dev = [
     { name = "jupyterlab", specifier = ">=4.5.8" },
     { name = "nbconvert", specifier = ">=7.17.1" },
     { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [[package]]

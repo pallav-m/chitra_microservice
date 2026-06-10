@@ -1,3 +1,5 @@
+import threading
+
 from demucs.pretrained import get_model
 from speechbrain.inference.speaker import EncoderClassifier
 from silero_vad import load_silero_vad
@@ -17,7 +19,12 @@ class ModelRegistry:
 
     _demucs = None
     _speaker_encoder = None
+    # Silero VAD is a stateful TorchScript model and is NOT safe to call from
+    # multiple threads at once (concurrent calls crash the process). Inference
+    # runs in a threadpool, so each thread gets its own VAD instance. `_vad`
+    # stays as a readiness sentinel (non-None once any instance has loaded).
     _vad = None
+    _vad_local = threading.local()
 
     @classmethod
     def get_demucs(cls):
@@ -43,8 +50,12 @@ class ModelRegistry:
 
     @classmethod
     def get_vad(cls):
-        # Silero VAD is a small CPU model; it runs fine off-GPU regardless of
-        # settings.device.
-        if cls._vad is None:
-            cls._vad = load_silero_vad()
-        return cls._vad
+        # One instance per calling thread (Silero VAD isn't thread-safe). The
+        # model is tiny, so per-thread copies are cheap and threads are reused by
+        # the inference threadpool, so each is created at most once.
+        model = getattr(cls._vad_local, "model", None)
+        if model is None:
+            model = load_silero_vad()
+            cls._vad_local.model = model
+            cls._vad = model  # readiness sentinel for /v1/health/ready
+        return model
