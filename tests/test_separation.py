@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import zipfile
 
 import numpy as np
 import pytest
@@ -111,6 +112,42 @@ def test_wav_stream(monkeypatch):
     assert resp.headers["content-type"] == "audio/wav"
     data, sr = sf.read(io.BytesIO(resp.content), always_2d=True)
     assert data.shape[0] > 0
+
+
+def _wav_bytes(seconds: float = 1.0, sr: int = 44100) -> bytes:
+    return base64.b64decode(_synthetic_wav_b64(seconds, sr))
+
+
+def test_upload_returns_zip_of_both_stems(monkeypatch):
+    _patch_separation(monkeypatch)
+    resp = client.post(
+        "/separate/upload",
+        files={"file": ("song.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    assert zf.namelist() == ["vocals.wav", "bgm.wav"]
+    for name in zf.namelist():
+        data, sr = sf.read(io.BytesIO(zf.read(name)), always_2d=True)
+        assert data.shape[0] > 0
+
+
+def test_upload_oversize_rejected(monkeypatch):
+    monkeypatch.setattr("app.routers.separation.settings.max_download_bytes", 100)
+    resp = client.post(
+        "/separate/upload",
+        files={"file": ("song.wav", _wav_bytes(seconds=1.0), "audio/wav")},
+    )
+    assert resp.status_code == 413
+
+
+def test_upload_bad_bytes_rejected():
+    resp = client.post(
+        "/separate/upload",
+        files={"file": ("junk.wav", b"not audio at all", "audio/wav")},
+    )
+    assert resp.status_code == 400
 
 
 def test_too_long_rejected(monkeypatch):

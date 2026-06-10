@@ -132,17 +132,21 @@ alongside.
 
 ## API
 
-All endpoints accept JSON. Both inference endpoints take the **same audio input
-shape** — provide **exactly one** of:
+**Choosing an input encoding:** the JSON endpoints (`/separate`, `/embed/speaker`)
+take **exactly one** of `base64` or `audioUri`; the upload endpoint
+(`/separate/upload`) takes a multipart `file`. Pick by payload/client: base64-JSON for
+small clips from JSON clients, `audioUri` when the audio is already hosted, multipart
+upload for binary blobs from a browser/app.
 
 | Field | Type | Description |
 |---|---|---|
 | `base64` | string | Inline base64-encoded audio bytes (WAV/FLAC/OGG; MP3 with a recent libsndfile) |
 | `audioUri` | string | A public HTTP(S) URL the service downloads (size/timeout capped) |
+| `file` (multipart) | blob | Binary audio upload — `/separate/upload` only |
 
-Supplying both, or neither, returns **422**. Audio longer than
-`MAX_AUDIO_DURATION_SEC` returns **413**. Undecodable input or a failed download
-returns **400**.
+For the JSON endpoints, supplying both `base64` and `audioUri`, or neither, returns
+**422**. Audio longer than `MAX_AUDIO_DURATION_SEC` returns **413** (as does an upload
+over the size cap). Undecodable input or a failed download returns **400**.
 
 ### Health — `GET /v1/health/live` · `GET /v1/health/ready`
 
@@ -218,6 +222,37 @@ resp = httpx.post(
 data = resp.json()
 open("vocals.wav", "wb").write(base64.b64decode(data["vocals"]))
 print("output sample rate:", data["sample_rate"])
+```
+
+### Separation (file upload) — `POST /separate/upload`
+
+Same separation, but takes a **multipart file upload** (a blob) instead of JSON, and
+streams back a single **`application/zip`** containing `vocals.wav` + `bgm.wav`. Use this
+for binary uploads from a browser form or app; use `POST /separate` when the audio is
+already base64/JSON or hosted at a URL.
+
+Form field: `file` — the audio blob (WAV/FLAC/OGG; MP3 with a recent libsndfile).
+
+```bash
+curl -s -X POST localhost:8000/separate/upload \
+  -F file=@song.wav \
+  --output stems.zip
+unzip -o stems.zip          # -> vocals.wav, bgm.wav
+```
+
+**Python client:**
+
+```python
+import httpx, zipfile, io
+
+with open("song.wav", "rb") as f:
+    resp = httpx.post(
+        "http://localhost:8000/separate/upload",
+        files={"file": ("song.wav", f, "audio/wav")},
+        timeout=120,
+    )
+zf = zipfile.ZipFile(io.BytesIO(resp.content))
+zf.extractall("stems/")     # writes stems/vocals.wav and stems/bgm.wav
 ```
 
 ### Speaker embedding — `POST /embed/speaker`

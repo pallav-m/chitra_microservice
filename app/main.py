@@ -28,7 +28,12 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Chitra Audio Service", lifespan=lifespan)
+app = FastAPI(title="Chitra Audio Service", lifespan=lifespan,
+              swagger_ui_parameters={
+            "displayRequestDuration": True,
+            "filter": True,
+            "docExpansion": "none"
+        })
 app.include_router(health.router)
 app.include_router(separation.router)
 app.include_router(embedding.router)
