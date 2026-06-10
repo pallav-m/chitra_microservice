@@ -16,6 +16,42 @@ Plus NVCF health probes: `GET /v1/health/live` and `GET /v1/health/ready`.
 
 ---
 
+## Quick start
+
+```bash
+# 1. Install dependencies (uv provisions Python 3.11 + the virtualenv)
+uv sync
+
+# 2. Run the service — device is auto-detected (cuda > mps > cpu)
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+
+# 3. Verify it's up (in another shell)
+curl -s localhost:8000/v1/health/ready        # -> {"status":"ready"}
+```
+
+The **first** start downloads model weights (Demucs, ECAPA, Silero) and can take a
+minute; later starts are fast. On a non-GPU host prepend `DEVICE=cpu`. Always keep
+`--workers 1` (more workers duplicate the models in VRAM).
+
+Run it in a container instead (GPU host):
+
+```bash
+docker build --platform linux/amd64 -t chitra-microservice .
+docker run --rm --gpus all -p 8000:8000 chitra-microservice
+```
+
+Then send a request:
+
+```bash
+curl -s -X POST localhost:8000/separate \
+  -H 'content-type: application/json' \
+  -d "{\"base64\":\"$(base64 -i song.wav)\",\"responseFormat\":\"json\"}" | jq keys
+```
+
+Full details below: [Running](#running) · [Building & deployment](#building--deployment) · [API](#api).
+
+---
+
 ## Why it's built this way
 
 The service is designed around the reality of **sharing one GPU across several
@@ -270,23 +306,101 @@ The fast suite mocks the models, so it runs in ~1s with no weights downloaded. T
 real-model tests are gated behind `RUN_MODEL_TESTS=1` (they download weights on
 first run).
 
-### Docker / NVCF
+---
+
+## Building & deployment
+
+### 1. Build the image
 
 ```bash
 docker build --platform linux/amd64 -t chitra-microservice .
-docker run --rm --gpus all -p 8000:8000 chitra-microservice
 ```
 
-The image is built for **NVCF**:
+The image is purpose-built for **NVCF**:
 
-- Pinned `linux/amd64` (PyTorch CUDA wheels and NVCF backends are x86_64-only).
+- Pinned `linux/amd64` — PyTorch CUDA wheels and NVCF backends are x86_64-only.
+  (On Apple Silicon this builds under emulation; build on an x86_64 box for speed.)
 - Runs as a **non-root** user (an NVCF requirement).
 - **Model weights are baked in at build time** so cold starts stay offline.
 - Health and inference share port **8000** (the NVCF `inferencePort`); the
-  container's `HEALTHCHECK` and NVCF's readiness probe both hit
-  `/v1/health/ready`.
-- `DEVICE=cuda` is set explicitly in the image so a GPU container never silently
-  falls back to CPU.
+  container `HEALTHCHECK` and NVCF's readiness probe both hit `/v1/health/ready`.
+- `DEVICE=cuda` is set explicitly so a GPU container never silently falls to CPU.
+
+### 2. Run it locally (smoke test before pushing)
+
+```bash
+docker run --rm --gpus all -p 8000:8000 chitra-microservice
+# wait for readiness, then:
+curl -s localhost:8000/v1/health/ready        # -> {"status":"ready"}
+```
+
+### 3. Push to the NGC private registry
+
+NVCF pulls images from NGC (`nvcr.io`). Authenticate once with your NGC API key,
+then tag and push:
+
+```bash
+# docker login: username is the literal '$oauthtoken', password is your NGC API key
+echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+ORG=your-ngc-org                 # your NGC org (and /team if applicable)
+TAG=nvcr.io/$ORG/chitra-microservice:0.1.0
+
+docker tag chitra-microservice "$TAG"
+docker push "$TAG"
+```
+
+### 4. Create & deploy the NVCF function
+
+Using the [NGC CLI](https://docs.ngc.nvidia.com/cli/) (`ngc`). Flag names vary
+slightly across CLI versions — confirm with `ngc cf function create --help`; the
+**values** below are what matter:
+
+```bash
+# Create a container-based function. Health + inference are on the same port.
+ngc cf function create \
+  --name chitra-microservice \
+  --container-image "$TAG" \
+  --container-port 8000 \
+  --inference-url /separate \
+  --health-uri /v1/health/ready \
+  --health-expected-status-code 200 \
+  --api-body-format CUSTOM            # we serve plain JSON, not the OpenAI schema
+# -> prints a FUNCTION_ID and VERSION_ID
+
+# Deploy that version onto a GPU backend with autoscaling.
+ngc cf function deploy create \
+  --function-id   <FUNCTION_ID> \
+  --function-version-id <VERSION_ID> \
+  --deployment-specification "gpu:L40S:1:<BACKEND>:<INSTANCE_TYPE>:min1:max3"
+#                             GPU model ^   count ^         min/max instances ^
+```
+
+What to get right for this service:
+
+- **`--health-uri /v1/health/ready`** — the single most common deploy failure is a
+  stale health path; if NVCF probes the wrong URL it gets 404 and recycles the
+  container forever. This must match the router prefix in `app/routers/health.py`.
+- **`--container-port 8000`** — health and inference share it (the `inferencePort`).
+- **GPU & instance count** — size for a 40 GB GPU; the per-model concurrency caps
+  (`DEMUCS_MAX_CONCURRENCY`, etc.) bound VRAM per instance. Scale throughput with
+  `max` instances (each gets its own GPU), **not** by raising `--workers`.
+- **Env overrides** — pass `DEMUCS_MAX_CONCURRENCY`, `GPU_ACQUIRE_TIMEOUT_SEC`,
+  `MAX_AUDIO_DURATION_SEC`, etc. as function environment variables to tune without
+  rebuilding the image.
+
+Once `Active`, invoke through the NVCF endpoint:
+
+```bash
+curl -s https://api.nvcf.nvidia.com/v2/nvcf/pexec/functions/<FUNCTION_ID> \
+  -H "Authorization: Bearer $NGC_API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"audioUri":"https://example.com/song.wav","responseFormat":"json"}'
+```
+
+> The CLI is one path; the same function/deployment can be created from the NVCF
+> web console or REST API. Whichever you use, the health URI, port, and API body
+> format are the fields that must match this service.
 
 ---
 
